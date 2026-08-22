@@ -207,6 +207,17 @@ def main(once=False):
             except Exception as e:
                 _log(f"ERR {symbol}: {e}")
 
+        # Update dashboard status each cycle
+        try:
+            sys.path.insert(0, "/home/ubuntu/habesha-swing")
+            from swing_status import build_status
+            import json as _json
+            _s = build_status()
+            with open("/home/ubuntu/adwa-engine/dashboard/swing_status.json", "w") as _f:
+                _json.dump(_s, _f)
+        except Exception as se:
+            _log(f"status update err: {se}")
+
         if once:
             break
         time.sleep(4 * 3600)  # check every 4h (aligns with candle close)
