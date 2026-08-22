@@ -25,7 +25,7 @@ This isn't a hunch. The parameters were validated over **2+ years** of 4-hour ba
 
 ## Live Dashboard
 
-📊 **http://129.80.112.9/dashboard/swing.html** — mission-control UI showing live equity, open positions, signal feed, and the attributed equity curve. Auto-refreshes every 10s.
+📊 **http://129.80.112.9/dashboard/index.html** — mission-control UI showing live equity, open positions, signal feed, and the attributed equity curve. Auto-refreshes every 10s.
 
 ## Architecture
 
@@ -57,3 +57,10 @@ Requires an Alpaca API key in the environment (`ALPACA_API_KEY`, `ALPACA_API_SEC
 
 ## Validation
 Full backtest + walk-forward methodology lives under **Operation 3X** — per-fold consistency is the core acceptance bar. Any parameter change must re-pass fold validation before shipping.
+
+## All Dashboards
+- **Control Center** (both systems): `http://129.80.112.9/dashboard/index.html`
+- **Swing** (this system): `http://129.80.112.9/dashboard/swing.html`
+- **Legacy 15m scalper**: `http://129.80.112.9/dashboard/habesha.html`
+
+> Note: use the `http://` prefix explicitly — the Oracle VPS has port 443 (HTTPS) closed, and browsers may force-HTTPS a bare IP and time out.
