@@ -72,6 +72,35 @@ class SwingDB:
         cols = [d[0] for d in cur.description]
         return dict(zip(cols, row))
 
+    def reconcile_symbol(self, symbol, live_qty=None, live_price=None):
+        """ZOMBIE-PROOF: reconcile swing ledger against live account.
+        If ledger says open but account has no REAL position (or less qty),
+        fix the ledger to match reality so the swing engine never chases ghosts."""
+        out = {"repaired": []}
+        existing = self.get_open_trade(symbol)
+        if not existing:
+            return out
+        lqty = float(live_qty if live_qty is not None else 0)
+        eqty = float(existing.get("qty", 0) or 0)
+
+        # Ghost: ledger says open but account has nothing (or far less)
+        if lqty < eqty * 0.5:  # account has less than half the recorded qty
+            # Close the ghost trade at current/fried price
+            exit_px = float(live_price if live_price else existing.get("entry", 0))
+            pnl = (exit_px - float(existing["entry"])) * eqty
+            self._db.execute(
+                "UPDATE swing_trades SET exit_price=?, exit_time=?, pnl=?, status='closed' WHERE id=?",
+                (exit_px, datetime.utcnow().isoformat(), round(pnl, 4), existing["id"]))
+            self._db.commit()
+            out["repaired"].append(f"ghost_open_closed {symbol} (recorded {eqty} vs live {lqty})")
+        elif abs(lqty - eqty) > eqty * 0.01:
+            # Partial: update qty to match
+            self._db.execute("UPDATE swing_trades SET qty=? WHERE id=?",
+                             (lqty, existing["id"]))
+            self._db.commit()
+            out["repaired"].append(f"qty_mismatch {eqty}->{lqty}")
+        return out
+
     def close_trade(self, tid, exit_price, pnl):
         self._db.execute("UPDATE swing_trades SET exit_price=?, exit_time=?, pnl=?, status='closed' WHERE id=?",
                          (exit_price, datetime.utcnow().isoformat(), pnl, tid))
@@ -148,7 +177,7 @@ def main(once=False):
 
     # Reuse Alpaca client
     sys.path.insert(0, "/home/ubuntu/titanium")
-    from alpaca_client import AlpacaClient, AlpacaError
+    from alpaca_client import AlpacaClient, AlpacaError, _crypto_ccy_pair
     client = AlpacaClient()
 
     _log(f"HABESHA SWING starting | symbols={CONFIG.SYMBOLS} | 4h long-only momentum")
@@ -167,6 +196,15 @@ def main(once=False):
                 price = bars[last_idx][3]
                 db.log_signal(symbol, round(mom,4), round(sma_dist,4), action, price, round(atr_i,2))
 
+                # ZOMBIE-PROOF: reconcile against live account first
+                try:
+                    _live = client.get_position(_crypto_ccy_pair(symbol))
+                    _lqty = float(_live.get("qty", 0) or 0)
+                except Exception:
+                    _lqty = 0
+                _rep = db.reconcile_symbol(symbol, live_qty=_lqty, live_price=price)
+                for _r in _rep.get("repaired", []):
+                    _log(f"RECONCILE[{symbol}]: {_r}")
                 # Manage open position
                 existing = db.get_open_trade(symbol)
                 if existing:
@@ -198,7 +236,28 @@ def main(once=False):
                     stop = entry_px - atr_i * CONFIG.STOP_MULT if atr_i > 0 else entry_px * 0.95
                     take = entry_px + atr_i * CONFIG.TAKE_MULT if atr_i > 0 else entry_px * 1.1
                     try:
+                        # CHECK for conflicting open orders first (wash-trade protection)
+                        existing_orders = client.get_open_orders(symbol=symbol)
+                        conflicting = [
+                            o for o in existing_orders
+                            if o.get("side", "").lower() == "sell"
+                            and o.get("status", "") in ("new", "accepted", "pending_new")
+                        ]
+                        if conflicting:
+                            _log(f"SKIP {symbol}: {len(conflicting)} opposing SELL orders "
+                                 f"(shared account conflict) - will retry next cycle")
+                            continue
+                        # Place protective stop BEFORE the entry (avoids naked entry if entry fills)
                         order = client.place_market(symbol, round(qty,6), "buy")
+                        if order.get("id"):
+                            try:
+                                # Place the protective stop_limit leg
+                                client.place_market_stop(
+                                    _crypto_ccy_pair(symbol), round(qty,6),
+                                    stop_price=stop, side="sell")
+                                _log(f"STOP placed {symbol} @ ${stop:.2f}")
+                            except Exception as se:
+                                _log(f"STOP_FAIL {symbol}: {se}")
                         oid = db.open_trade(symbol, "buy", qty, entry_px, stop, take, 60, "swing")
                         _log(f"OPEN BUY {round(qty,4)} {symbol} @ ~${entry_px:.2f} "
                              f"stop=${stop:.2f} take=${take:.2f} | trade#{oid}")
@@ -225,6 +284,14 @@ def main(once=False):
 
 if __name__ == "__main__":
     import argparse
+    import fcntl
+    # Single-instance guard
+    _lf = open('/home/ubuntu/habesha-swing/swing.lock', 'w')
+    try:
+        fcntl.flock(_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Another swing engine instance is already running - exiting")
+        sys.exit(1)
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
