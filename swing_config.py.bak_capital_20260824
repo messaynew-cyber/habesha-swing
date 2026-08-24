@@ -26,10 +26,10 @@ class SwingConfig:
     RSI_MAX: float = float(os.getenv("SWING_RSI_MAX", "80"))      # avoid overbought tops
 
     # --- RISK ---
-    MAX_POS_SIZE_PCT: float = float(os.getenv("SWING_POS_PCT", "0.40"))  # 30% per position
+    MAX_POS_SIZE_PCT: float = float(os.getenv("SWING_POS_PCT", "0.30"))  # 30% per position
     MAX_OPEN_POSITIONS: int = int(os.getenv("SWING_MAX_OPEN", "3"))
     MAX_DAILY_LOSS_PCT: float = float(os.getenv("SWING_DAILY_LOSS", "0.04"))
-    CASH_BUFFER_PCT: float = float(os.getenv("SWING_CASH_BUFFER", "0.75"))
+    CASH_BUFFER_PCT: float = float(os.getenv("SWING_CASH_BUFFER", "0.90"))
 
     # Tag for shared-account P&L attribution
     TRADE_TAG: str = "SWING"
