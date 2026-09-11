@@ -122,8 +122,32 @@ class SwingDB:
 
 
 # --- Strategy ---
-def load_4h_bars(symbol):
-    """Load 4h bars from the shared history cache (floats)."""
+def load_4h_bars(symbol, client=None):
+    """Load 4h bars. PREFERS LIVE Alpaca fetch; falls back to file cache.
+
+    The file cache (history_data_4h/) was found frozen at Aug-22 in production
+    (no refresh cron), causing the engine to trade on stale signals. Live fetch
+    eliminates that dependency. Pass the shared AlpacaClient in."""
+    # 1) Try live fetch from Alpaca (4Hour crypto bars)
+    if client is not None:
+        try:
+            bars = client.get_bars(symbol, timeframe="4Hour", limit=200)
+            raw = bars.get("bars") if isinstance(bars, dict) else None
+            if raw:
+                out = []
+                for b in raw:
+                    try:
+                        c = float(b["c"]); h = float(b["h"]); l = float(b["l"]); o = float(b["o"])
+                        if c > 0 and h >= l:
+                            out.append((o, h, l, c, b.get("t","")))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                if len(out) >= 60:
+                    return out
+        except Exception:
+            pass  # fall back to file cache
+
+    # 2) File cache fallback (older bars, still useful for warm-up / offline)
     fname = f"{CONFIG.DATA_DIR_4H}/history_{symbol.replace('/', '')}.json"
     if not os.path.exists(fname):
         return None
@@ -175,9 +199,18 @@ def main(once=False):
         with open(f"{log_dir}/swing.log", "a") as f:
             f.write(line + "\n")
 
+    def _notify(msg):
+        """Log AND push to Telegram. Non-fatal if Telegram is down."""
+        _log(msg)
+        try:
+            notifier.send(f"🟢 SWING: {msg}")
+        except Exception as e:
+            _log(f"notify err: {e}")
+
     # Reuse Alpaca client
     sys.path.insert(0, "/home/ubuntu/titanium")
     from alpaca_client import AlpacaClient, AlpacaError, _crypto_ccy_pair
+    from notify import notifier  # Telegram (2026-08-26): swing was silent before
     client = AlpacaClient()
 
     _log(f"HABESHA SWING starting | symbols={CONFIG.SYMBOLS} | 4h long-only momentum")
@@ -186,7 +219,7 @@ def main(once=False):
         for symbol in CONFIG.SYMBOLS.split(","):
             symbol = symbol.strip()
             try:
-                bars = load_4h_bars(symbol)
+                bars = load_4h_bars(symbol, client)
                 if bars is None or len(bars) < 100:
                     _log(f"{symbol}: no 4h data")
                     continue
@@ -216,7 +249,7 @@ def main(once=False):
                             client.close_position(symbol)
                             pnl = (price - entry) * float(existing["qty"])
                             db.close_trade(existing["id"], price, round(pnl,4))
-                            _log(f"CLOSE {symbol} at TAKE ${take:.2f} (px {price:.2f}) pnl=${pnl:+.2f}")
+                            _notify(f"CLOSE ✅ {symbol} at TAKE ${take:.2f} (px {price:.2f}) pnl=${pnl:+.2f}")
                         except Exception as e:
                             _log(f"CLOSE_FAIL {symbol}: {e}")
                     continue  # position open, don't open another
@@ -244,8 +277,7 @@ def main(once=False):
                             and o.get("status", "") in ("new", "accepted", "pending_new")
                         ]
                         if conflicting:
-                            _log(f"SKIP {symbol}: {len(conflicting)} opposing SELL orders "
-                                 f"(shared account conflict) - will retry next cycle")
+                            _notify(f"SKIP {symbol}: {len(conflicting)} opposing SELL orders (shared account conflict)")
                             continue
                         # Place protective stop BEFORE the entry (avoids naked entry if entry fills)
                         order = client.place_market(symbol, round(qty,6), "buy")
@@ -259,10 +291,10 @@ def main(once=False):
                             except Exception as se:
                                 _log(f"STOP_FAIL {symbol}: {se}")
                         oid = db.open_trade(symbol, "buy", qty, entry_px, stop, take, 60, "swing")
-                        _log(f"OPEN BUY {round(qty,4)} {symbol} @ ~${entry_px:.2f} "
-                             f"stop=${stop:.2f} take=${take:.2f} | trade#{oid}")
+                        _notify(f"OPEN 🚀 BUY {round(qty,4)} {symbol} @ ~${entry_px:.2f} "
+                                f"stop=${stop:.2f} take=${take:.2f} | trade#{oid}")
                     except Exception as e:
-                        _log(f"OPEN_FAIL {symbol}: {e}")
+                        _notify(f"OPEN_FAIL ❌ {symbol}: {e}")
             except Exception as e:
                 _log(f"ERR {symbol}: {e}")
 
